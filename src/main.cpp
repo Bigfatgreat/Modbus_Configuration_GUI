@@ -85,7 +85,7 @@ TaskHandle_t sensorTaskHandle = nullptr;
 TaskHandle_t healthTaskHandle = nullptr;
 TaskHandle_t mqttTaskHandle   = nullptr;
 
-
+//---- Setup ----
 void setup() {
   Serial.begin(115200);
   
@@ -137,7 +137,6 @@ void TaskMQTT(void *pvParameters) {
     // Ensure WiFi
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("[MQTTTask] Reconnecting WiFi...");
-      
       setupWiFi();
     }
     // Ensure MQTT
@@ -283,11 +282,50 @@ void handleCommand(const String &cmd) {
       Serial.println("ACK:SET_MQTT");
     }
   }
-  else if (cmd == "pref_res") {
-    // Clear all preferences stored in the ESP32
-    preferences.clear();
-    Serial.println("ACK: Preferences have been reset");
+  else if (cmd == "PREF_RESET") {
+  preferences.clear();
+  config.slaves.clear();
+  config.bus = {};  // reset bus config too if needed
+  // reset other config members as well
+  Serial.println("ACK:PREF_RESET");
+}
+  else if (cmd.startsWith("SET_SLAVE_LIST:")) {
+  String payload = cmd.substring(cmd.indexOf(':') + 1);
+  config.slaves.clear();
+
+  int start = 0;
+  while (start < (int)payload.length()) {
+    int sep = payload.indexOf('|', start);
+    String item = sep == -1 ? payload.substring(start) : payload.substring(start, sep);
+
+    std::vector<String> parts;
+    int idx;
+    while ((idx = item.indexOf(';')) != -1) {
+      parts.push_back(item.substring(0, idx));
+      item = item.substring(idx + 1);
+    }
+    parts.push_back(item);
+
+    if (parts.size() >= 5) {
+      SlaveConfig s;
+      s.addr     = parts[0].toInt();
+      s.func     = parts[1].toInt();
+      s.startReg = parts[2].toInt();
+      s.count    = parts[3].toInt();
+      s.topic    = parts[4];
+      s.online   = false;
+      config.slaves.push_back(s);
+    }
+
+    if (sep == -1) break;
+    start = sep + 1;
   }
+
+  saveConfig();
+  Serial.println("ACK:SET_SLAVE_LIST");
+}
+
+
 }
 
 void sendBusCfg() {
@@ -393,7 +431,6 @@ void publishConfig() {
 
 //---- Persistence ----
 void loadConfig() {
-  
   String js = preferences.getString("configJson", "");
   if (!js.isEmpty()) {
     DynamicJsonDocument doc(4096);
@@ -439,7 +476,15 @@ void loadConfig() {
     3,       // func (read holding regs)
     0x34,    // startReg
     3,       // count
-    "sensors/all",
+    "sensors/acc",
+    false    // online
+  });
+  config.slaves.push_back({
+    1,       // addr
+    3,       // func (read holding regs)
+    0x01,    // startReg
+    3,       // count
+    "sensors/vel",
     false    // online
   });
 }
@@ -518,91 +563,48 @@ void checkRS485() {
 
 void sendSensorData() {
   if (!mqttClient.connected()) return;
-  
-  const uint8_t targetAddr = 1;            // ← the Modbus address you want
-  // find the config entry for address 1
-  auto it = std::find_if(
-    config.slaves.begin(),
-    config.slaves.end(),
-    [targetAddr](const SlaveConfig &cfg){ return cfg.addr == targetAddr; }
-  );
-  if (it == config.slaves.end()) {
-    Serial.printf("No slave at address %u\n", targetAddr);
-    return;
-  }
 
-  SlaveConfig &s = *it;                    // now s refers to the slave with addr==1
-  
-  // check online flag
-  //SlaveConfig &s = config.slaves[0];
-  if (!s.online) {
-    return;
-  }
+  for (auto &s : config.slaves) {
+    // 1) lock the bus
+    xSemaphoreTake(rs485Mutex, portMAX_DELAY);
 
-  StaticJsonDocument<256> doc;
-  uint8_t res;
-  xSemaphoreTake(rs485Mutex, portMAX_DELAY);
-  // 1) Acceleration @0x34
-  node.begin(s.addr, Serial2);
-  
-  res = node.readHoldingRegisters(0x34, 3);
-  
-  if (res == node.ku8MBSuccess) {
-    for (uint8_t k = 0; k < 3; k++) {
-      int16_t raw = node.getResponseBuffer(k);
-      float g     = (raw / 32767.0f) * 16 * 9.8f * 0.1f;
-      const char* key = (k == 0 ? "AX" : k == 1 ? "AY" : "AZ");
-      doc[key] = g;
+    // 2) configure Modbus
+    node.begin(s.addr, Serial2);
+    //node.setTimeout(200);
+
+    // 3) drive DE/RE high, read, then drive it low
+    digitalWrite(RS485_DE_RE_PIN, HIGH);
+    //delayMicroseconds(100);
+    uint8_t res = node.readHoldingRegisters(s.startReg, s.count);
+    digitalWrite(RS485_DE_RE_PIN, LOW);
+
+    // 4) release the bus
+    xSemaphoreGive(rs485Mutex);
+
+    // 5) if success, build JSON & publish
+    if (res == node.ku8MBSuccess) {
+      StaticJsonDocument<256> doc;
+      for (uint16_t i = 0; i < s.count; ++i) {
+        // e.g. keys "r0", "r1", "r2", …
+        char key[4];
+        snprintf(key, sizeof(key), "r%u", i);
+        doc[key] = node.getResponseBuffer(i);
+      }
+
+      String payload;
+      serializeJson(doc, payload);
+      mqttClient.publish(s.topic.c_str(), payload.c_str());
+      Serial.printf("%u→ %s : %s\n",s.addr, s.topic.c_str(), payload.c_str());
+    } else {
+      Serial.printf("Read failed on addr %u @0x%X count %u\n",
+                    s.addr, s.startReg, s.count);
     }
-  }
 
-  // 2) Velocity @0x3A
-  node.begin(s.addr, Serial2);
-  
-  res = node.readHoldingRegisters(0x3A, 3);
-  
-  if (res == node.ku8MBSuccess) {
-    doc["VX"] = node.getResponseBuffer(0);
-    doc["VY"] = node.getResponseBuffer(1);
-    doc["VZ"] = node.getResponseBuffer(2);
+    // tiny pause so you don’t blast the bus or watchdog
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
-
-  // 3) TEMP @0x40
-  node.begin(s.addr, Serial2);
-  
-  res = node.readHoldingRegisters(0x40, 1);
-  
-  if (res == node.ku8MBSuccess) {
-    doc["TEMP"] = node.getResponseBuffer(0) * 0.01f;
-  }
-
-  // 4) Displacement @0x41
-  node.begin(s.addr, Serial2);
-  
-  res = node.readHoldingRegisters(0x41, 3);
-  
-  if (res == node.ku8MBSuccess) {
-    doc["DX"] = node.getResponseBuffer(0);
-    doc["DY"] = node.getResponseBuffer(1);
-    doc["DZ"] = node.getResponseBuffer(2);
-  }
-
-  // 5) Vibration Frequency @0x44
-  node.begin(s.addr, Serial2);
-  
-  res = node.readHoldingRegisters(0x44, 3);
- 
-  if (res == node.ku8MBSuccess) {
-    doc["HzX"] = node.getResponseBuffer(0);
-    doc["HzY"] = node.getResponseBuffer(1);
-    doc["HzZ"] = node.getResponseBuffer(2);
-  }
-
-  xSemaphoreGive(rs485Mutex);
-  String payload;
-  serializeJson(doc, payload);
-  mqttClient.publish(s.topic.c_str(), payload.c_str());
-  Serial.printf("ID:%u → %s : %s\n",s.addr, s.topic.c_str(), payload.c_str());
 }
+
+
 
 

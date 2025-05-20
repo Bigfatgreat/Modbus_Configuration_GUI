@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont,QIcon
 import markdown
+
 MONOKAI_QSS = r"""
 #central {
     background-color: #f8f8f2;
@@ -31,8 +32,8 @@ QToolButton:hover {
 }
 
 QTabBar::tab {
-    background: #3E3D32;
-    color: #A6E22E;
+    background: #e4e1b7;
+    color: #2e4401;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
     padding: 8px;
@@ -43,17 +44,17 @@ QTabBar::tab:selected {
     color: #272822;
 }
 QComboBox, QPushButton, QLineEdit {
-    background-color: #272822;
-    color: #F8F8F2;
-    border: 1px solid #A6E22E;
+    background-color: #f8f8f0;
+    color: #18390c;
+    border: 2px solid #506b39;
     border-radius: 8px;
     padding: 4px;
 }
 QComboBox QAbstractItemView {
-    background-color: #272822;
-    selection-background-color: #A6E22E;
-    color: #F8F8F2;
-    border: 1px solid #A6E22E;
+    background-color: #f8f8f0;
+    selection-background-color: #18390c;
+    color: #0b0100;
+    border: 2px solid #A6E22E;
     border-radius: 8px;
 }
 QPushButton {
@@ -76,24 +77,38 @@ QLabel#statusDot {
     font-size: 20px;
 }
 QTextEdit {
-    background-color: #272822;
-    color: #F8F8F2;
-    border: 1px solid #A6E22E;
+    background-color: #f8f8f0;
+    color: #20201e;
+    border: 3px solid #2f4600;
     border-radius: 8px;
 }
 QTableWidget {
-    background-color: #272822;
-    color: #F8F8F2;
-    border: 1px solid #A6E22E;
+    background-color: #f8f8f0;        /* light background */
+    color: #20201e;                   /* dark text */
+    border: 3px solid #2f4600;        /* thicker border */
     border-radius: 8px;
+    gridline-color: #2f4600;          /* visible grid lines */
 }
+
 QHeaderView::section {
-    background-color: #3E3D32;
-    color: #A6E22E;
+    background-color: #d0e3a1;       /* lighter green header */
+    color: #2f4600;                  /* dark green text */
+    padding: 6px;                   /* some padding */
+    
+    font-weight: bold;              /* bold header text */
+    font-size: 10pt;
+}
+
+QTableWidget::item {
+    font-weight: 100;               /* make cell text heavier */
     padding: 4px;
-    border: none;
+}
+
+QTableWidget::item:hover {
+    background-color: #42473633;   /* highlight on hover */
 }
 """
+
 
 class SensorDataGUI(QMainWindow):
     # Signals for UI updates
@@ -111,6 +126,7 @@ class SensorDataGUI(QMainWindow):
         self._populating = False
         self.init_ui()
         # Connect signals
+        self._slave_configs = []  # List of dicts, each corresponds to a row
         self.log_line.connect(self.log.append)
         self.wifi_update.connect(self._on_wifi_update)
         self.mqtt_update.connect(self._on_mqtt_update)
@@ -118,16 +134,16 @@ class SensorDataGUI(QMainWindow):
         self.slave_list_received.connect(self._on_slave_list)
         # Table edits
         self.slave_table.setEditTriggers(QAbstractItemView.AllEditTriggers)
-        self.slave_table.itemChanged.connect(self._on_slave_item_changed)
+        #self.slave_table.itemChanged.connect(self._on_slave_item_changed)
 
     def init_ui(self):
         central = QWidget();central.setObjectName("central"); self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         tabs = QTabWidget(); layout.addWidget(tabs)
-        tabs.addTab(self._create_serial_tab(), "Serial")
-        tabs.addTab(self._create_wifi_tab(), "Wi-Fi")
-        tabs.addTab(self._create_mqtt_tab(), "MQTT")
-        tabs.addTab(self._create_rs485_tab(), "RS-485")
+        tabs.addTab(self._create_serial_tab(), "🔌 Serial")
+        tabs.addTab(self._create_wifi_tab(), "📶 Wi-Fi")
+        tabs.addTab(self._create_mqtt_tab(), "☁️ MQTT")
+        tabs.addTab(self._create_rs485_tab(), "🔧 RS-485")
         help_btn = QToolButton()
         help_btn.setText("?")
         help_btn.setToolTip("Help")
@@ -138,23 +154,73 @@ class SensorDataGUI(QMainWindow):
         self.setFont(QFont("Courier New", 10))
 
     def _create_serial_tab(self):
-        tab = QWidget(); layout = QVBoxLayout(tab)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Status dots and labels (WiFi, MQTT)
         h = QHBoxLayout()
-        self.wifi_dot = QLabel('●'); self.wifi_dot.setStyleSheet('color:red')
-        self.wifi_lbl = QLabel('WiFi: Disconnected'); h.addWidget(self.wifi_dot); h.addWidget(self.wifi_lbl)
-        self.mqtt_dot = QLabel('●'); self.mqtt_dot.setStyleSheet('color:red')
-        self.mqtt_lbl = QLabel('MQTT: Disconnected'); h.addWidget(self.mqtt_dot); h.addWidget(self.mqtt_lbl)
-        h.addStretch(); layout.addLayout(h)
+        self.wifi_dot = QLabel('●')
+        self.wifi_dot.setStyleSheet('color:red')
+        self.wifi_lbl = QLabel('WiFi: Disconnected')
+        h.addWidget(self.wifi_dot)
+        h.addWidget(self.wifi_lbl)
+
+        self.mqtt_dot = QLabel('●')
+        self.mqtt_dot.setStyleSheet('color:red')
+        self.mqtt_lbl = QLabel('MQTT: Disconnected')
+        h.addWidget(self.mqtt_dot)
+        h.addWidget(self.mqtt_lbl)
+
+        h.addStretch()
+        layout.addLayout(h)
+
+        # Controls: Scan, Port Combo, Baud Combo, Connect, Disconnect, Clear Log (Rightmost)
         h = QHBoxLayout()
-        self.btn_scan = QPushButton('Scan'); self.btn_scan.clicked.connect(self.scan_ports)
-        self.combo_port = QComboBox(); self.combo_baud = QComboBox()
-        for b in ["9600","19200","38400","57600","115200"]: self.combo_baud.addItem(b)
-        self.btn_conn = QPushButton('Connect'); self.btn_conn.clicked.connect(self.connect_serial)
-        self.btn_disconn = QPushButton('Disconnect'); self.btn_disconn.clicked.connect(self.disconnect_serial)
-        h.addWidget(self.btn_scan); h.addWidget(self.combo_port); h.addWidget(self.combo_baud)
-        h.addWidget(self.btn_conn); h.addWidget(self.btn_disconn); h.addStretch(); layout.addLayout(h)
-        self.log = QTextEdit(); self.log.setReadOnly(True); layout.addWidget(self.log)
+        self.btn_scan = QPushButton('Scan')
+        self.btn_scan.clicked.connect(self.scan_ports)
+
+        self.combo_port = QComboBox()
+
+        self.combo_baud = QComboBox()
+        for b in ["9600", "19200", "38400", "57600", "115200"]:
+            self.combo_baud.addItem(b)
+
+        self.btn_conn = QPushButton('Connect')
+        self.btn_conn.clicked.connect(self.connect_serial)
+
+        self.btn_disconn = QPushButton('❌ Disconnect')
+        self.btn_disconn.clicked.connect(self.disconnect_serial)
+
+        self.btn_clear_log = QPushButton('🧹 Clear Log')  # Emoji broom for clearing
+        self.btn_clear_log.clicked.connect(self.clear_log)
+
+        # Add widgets to layout
+        h.addWidget(self.btn_scan)
+        h.addWidget(self.combo_port)
+        h.addWidget(self.combo_baud)
+        h.addWidget(self.btn_conn)
+        h.addWidget(self.btn_disconn)
+
+        # Add stretch here to push the next widget to the rightmost
+        h.addStretch()
+
+        # Add clear log button last to be rightmost
+        h.addWidget(self.btn_clear_log)
+
+        layout.addLayout(h)
+
+        # Log display
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log)
+
         return tab
+
+
+    def clear_log(self):
+        self.log.clear()
+
+
 
     
     def _create_wifi_tab(self):
@@ -291,7 +357,10 @@ class SensorDataGUI(QMainWindow):
         btn_add = QPushButton('+ Add'); btn_add.clicked.connect(self.add_slave)
         btn_rem = QPushButton('- Remove'); btn_rem.clicked.connect(self.remove_slave)
         btn_refresh = QPushButton('Refresh Slaves'); btn_refresh.clicked.connect(lambda: self.send_cmd('GET_SLAVE_LIST'))
-        for b in [btn_add, btn_rem, btn_refresh]: h2.addWidget(b)
+        btn_apply_all = QPushButton("Apply All");btn_apply_all.clicked.connect(self.send_slave_list)
+# Add this button somewhere in your layout, e.g., next to Add/Remove buttons
+
+        for b in [btn_add, btn_rem, btn_refresh,btn_apply_all]: h2.addWidget(b)
         h2.addStretch(); layout.addLayout(h2)
 
         # Add a new button to trigger CHECK_RS485
@@ -379,26 +448,70 @@ class SensorDataGUI(QMainWindow):
                 self.slave_table.setItem(r,5,QTableWidgetItem(status)); return
 
     # --- Table Edit Handler ---
-    def _on_slave_item_changed(self, item):
-        if self._populating: return
-        row, col = item.row(), item.column()
-        addr_item = self.slave_table.item(row,0)
-        if not addr_item: return
-        try:
-            addr = int(addr_item.text())
-        except:
-            return
-        if col in (1,2,3):  # func, start, count
+    def send_slave_list(self):
+        parts = []
+        for row in range(self.slave_table.rowCount()):
             try:
-                func  = int(self.slave_table.item(row,1).text())
-                start = int(self.slave_table.item(row,2).text())
-                cnt   = int(self.slave_table.item(row,3).text())
-                self.send_cmd(f'SET_SLAVE_CFG:{addr};{func};{start};{cnt}')
-            except:
-                pass
-        elif col==4:  # topic
-            topic = self.slave_table.item(row,4).text()
-            self.send_cmd(f'SET_SLAVE_TOPIC:{addr};{topic}')
+                addr = self.slave_table.item(row, 0).text()
+                func = self.slave_table.item(row, 1).text()
+                start = self.slave_table.item(row, 2).text()
+                count = self.slave_table.item(row, 3).text()
+                topic = self.slave_table.item(row, 4).text()
+                parts.append(f"{addr};{func};{start};{count};{topic}")
+            except Exception:
+                continue
+        cmd = "SET_SLAVE_LIST:" + "|".join(parts)
+        self.send_cmd(cmd)
+
+    def _on_slave_list(self, lst):
+        self.slave_table.setRowCount(0)
+        self._slave_configs.clear()
+        for s in lst:
+            r = self.slave_table.rowCount()
+            self.slave_table.insertRow(r)
+            self.slave_table.setItem(r, 0, QTableWidgetItem(str(s['addr'])))
+            self.slave_table.setItem(r, 1, QTableWidgetItem(str(s['func'])))
+            self.slave_table.setItem(r, 2, QTableWidgetItem(str(s['start'])))
+            self.slave_table.setItem(r, 3, QTableWidgetItem(str(s['count'])))
+            self.slave_table.setItem(r, 4, QTableWidgetItem(s['topic']))
+            self.slave_table.setItem(r, 5, QTableWidgetItem('Unknown'))
+
+            # Store full config for this row
+            self._slave_configs.append({
+                'addr': s['addr'],
+                'func': s['func'],
+                'start': s['start'],
+                'count': s['count'],
+                'topic': s['topic']
+            })
+    def _on_slave_item_changed(self, item):
+        if self._populating:
+            return
+        row, col = item.row(), item.column()
+        if row >= len(self._slave_configs):
+            return
+
+        old_cfg = self._slave_configs[row]
+
+        try:
+            addr = int(self.slave_table.item(row, 0).text())
+            func = int(self.slave_table.item(row, 1).text())
+            start = int(self.slave_table.item(row, 2).text())
+            count = int(self.slave_table.item(row, 3).text())
+            topic = self.slave_table.item(row, 4).text()
+        except Exception:
+            return
+
+        if col in (1, 2, 3):  # func, start, count edited
+            # Send full old config + new func/start/count
+            cmd = f"SET_SLAVE_CFG:{old_cfg['addr']};{old_cfg['func']};{old_cfg['start']};{old_cfg['count']};{old_cfg['topic']};{func};{start};{count}"
+            self.send_cmd(cmd)
+
+        elif col == 4:  # topic edited
+            old_topic = old_cfg['topic']
+            new_topic = topic
+            cmd = f"SET_SLAVE_TOPIC:{old_cfg['addr']};{old_cfg['func']};{old_cfg['start']};{old_cfg['count']};{old_topic};{new_topic}"
+            self.send_cmd(cmd)
 
     # --- Actions ---
     def apply_bus(self):
@@ -406,31 +519,27 @@ class SensorDataGUI(QMainWindow):
         self.send_cmd(cmd)
 
     def add_slave(self):
-        addr,ok = QInputDialog.getInt(self,'Add Slave','Address:',1,1,247)
-        if not ok: return
-        self.send_cmd(f'ADD_SLAVE:{addr}')
-        self.send_cmd('GET_SLAVE_LIST')
+        r = self.slave_table.rowCount()
+        self.slave_table.insertRow(r)
+        # Set default blank or sample values, user edits later
+        self.slave_table.setItem(r, 0, QTableWidgetItem("1"))
+        self.slave_table.setItem(r, 1, QTableWidgetItem("3"))
+        self.slave_table.setItem(r, 2, QTableWidgetItem("0"))
+        self.slave_table.setItem(r, 3, QTableWidgetItem("1"))
+        self.slave_table.setItem(r, 4, QTableWidgetItem("sensors/new"))
+        self.slave_table.setItem(r, 5, QTableWidgetItem("Unknown"))
+
 
     def remove_slave(self):
         sel = self.slave_table.selectedItems()
         if not sel:
             return
-        row = sel[0].row()
-        addr = int(self.slave_table.item(row, 0).text())
+        rows = set(item.row() for item in sel)
+        for row in sorted(rows, reverse=True):
+            self.slave_table.removeRow(row)
+        # Note: no command sent here; user must click Apply All to sync
 
-        # Check if there's only one slave address left
-        if self.slave_table.rowCount() <= 1:
-            msg = QMessageBox()
-            msg.setIcon(QMessageBox.Warning)
-            msg.setWindowTitle("Cannot Remove Slave")
-            msg.setText("You cannot delete the last slave address. Please ensure at least one slave is present.")
-            msg.setStandardButtons(QMessageBox.Ok)
-            msg.exec_()
-            return
 
-        self.send_cmd(f'REMOVE_SLAVE:{addr}')
-        self.send_cmd('GET_SLAVE_LIST')
-    
     def check_rs485(self):
         self.send_cmd("CHECK_RS485")
 
@@ -451,7 +560,7 @@ serial_md = """
 wifi_md = """
 # Wi-Fi Tab Help
 
-- Wifi SSID: 
+- Wifi SSID:
 - Wifi password:
 - Test wifi:
 - Test wifi password:
