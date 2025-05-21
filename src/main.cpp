@@ -5,7 +5,9 @@
 #include <ModbusMaster.h>
 #include <ArduinoJson.h>
 #include <vector>
-#include <algorithm>
+
+#include <map>
+#include <set>
 
 // FreeRTOS
 #include <freertos/FreeRTOS.h>
@@ -23,6 +25,12 @@ constexpr TickType_t MQTT_CHECK_DELAY   = pdMS_TO_TICKS(1000);
 constexpr TickType_t RS485_CHECK_DELAY   = pdMS_TO_TICKS(5000);
 constexpr TickType_t SENSOR_READ_DELAY   = pdMS_TO_TICKS(10);
 constexpr TickType_t SERIAL_CHECK_DELAY  = pdMS_TO_TICKS(50);
+
+
+std::map<uint8_t, bool> slaveOnlineStatus;  // true = online, false = offline
+std::map<uint8_t, uint8_t> slaveFailCount;  // count recent failures
+const uint8_t MAX_FAILS = 3;                 // max failures before marking offline
+
 
 //---- Globals ----
 Preferences      preferences;
@@ -157,11 +165,22 @@ void TaskRS485Health(void *pvParameters) {
 }
 
 void TaskSensorRead(void *pvParameters) {
+  unsigned long lastCheckTime = 0;
+  const unsigned long CHECK_INTERVAL = 30 * 1000;  // 30 seconds
+
   for (;;) {
     sendSensorData();
-    vTaskDelay(SENSOR_READ_DELAY);
+
+    // Check if it's time to run checkRS485
+    if (millis() - lastCheckTime >= CHECK_INTERVAL) {
+      checkRS485();
+      lastCheckTime = millis();
+    }
+
+    vTaskDelay(SENSOR_READ_DELAY);  // your normal polling delay
   }
 }
+
 
 void setupWiFi() {
   if (config.wifiSSID.isEmpty()) return;
@@ -536,26 +555,43 @@ void applyBusConfig() {
 
 //---- Health Check ----
 void checkRS485() {
+  std::set<uint8_t> seen;
+  std::vector<uint8_t> uniqueAddrs;
+
+  // 1. Collect unique slave addresses
   for (auto &s : config.slaves) {
-    // wait for exclusive access
+    if (seen.find(s.addr) == seen.end()) {
+      uniqueAddrs.push_back(s.addr);
+      seen.insert(s.addr);
+    }
+  }
+
+  // 2. Loop through each unique slave address once
+  for (auto addr : uniqueAddrs) {
+    node.begin(addr, Serial2);
     xSemaphoreTake(rs485Mutex, portMAX_DELAY);
-
-    node.begin(s.addr, Serial2);
-    
-    digitalWrite(RS485_DE_RE_PIN, HIGH);
-    delayMicroseconds(100);
-    uint8_t res = node.readHoldingRegisters(s.startReg, 1);
-    digitalWrite(RS485_DE_RE_PIN, LOW);
-
-    s.online = (res == node.ku8MBSuccess);
-    Serial.printf("STATUS:SLAVE:%u,%s\n", s.addr, s.online?"ONLINE":"OFFLINE");
-
+    uint8_t res = node.readHoldingRegisters(0x0000, 1);  // Use minimal ping
     xSemaphoreGive(rs485Mutex);
 
-    // yield so you don't monopolize CPU
-    vTaskDelay(pdMS_TO_TICKS(10));
+    if (res == node.ku8MBSuccess) {
+      slaveOnlineStatus[addr] = true;
+      slaveFailCount[addr] = 0;
+      Serial.printf("STATUS:SLAVE:%u,ONLINE\n", addr);
+    } else {
+      slaveFailCount[addr]++;
+      if (slaveFailCount[addr] >= MAX_FAILS) {
+        slaveOnlineStatus[addr] = false;
+        Serial.printf("STATUS:SLAVE:%u,OFFLINE\n", addr);
+      } else {
+        Serial.printf("STATUS:SLAVE:%u,UNKNOWN\n", addr);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));  // prevent bus flooding
   }
 }
+
+
 
 //---- Sensor Read & Publish ----
 
@@ -565,46 +601,91 @@ void sendSensorData() {
   if (!mqttClient.connected()) return;
 
   for (auto &s : config.slaves) {
-    // 1) lock the bus
+    // Skip offline slaves
+    if (slaveOnlineStatus.find(s.addr) != slaveOnlineStatus.end() && !slaveOnlineStatus[s.addr]) {
+      continue;
+    }
+
     xSemaphoreTake(rs485Mutex, portMAX_DELAY);
-
-    // 2) configure Modbus
     node.begin(s.addr, Serial2);
-    //node.setTimeout(200);
-
-    // 3) drive DE/RE high, read, then drive it low
     digitalWrite(RS485_DE_RE_PIN, HIGH);
-    //delayMicroseconds(100);
-    uint8_t res = node.readHoldingRegisters(s.startReg, s.count);
-    digitalWrite(RS485_DE_RE_PIN, LOW);
 
-    // 4) release the bus
+    uint8_t res = node.ku8MBIllegalFunction;
+
+    switch (s.func) {
+      case 1: // Read Coils
+        res = node.readCoils(s.startReg, s.count);
+        break;
+      case 2: // Read Discrete Inputs
+        res = node.readDiscreteInputs(s.startReg, s.count);
+        break;
+      case 3: // Read Holding Registers
+        res = node.readHoldingRegisters(s.startReg, s.count);
+        break;
+      case 4: // Read Input Registers
+        res = node.readInputRegisters(s.startReg, s.count);
+        break;
+      default:
+        Serial.printf("Unsupported func %u for slave %u\n", s.func, s.addr);
+        break;
+    }
+
+    digitalWrite(RS485_DE_RE_PIN, LOW);
     xSemaphoreGive(rs485Mutex);
 
-    // 5) if success, build JSON & publish
+    if (s.topic.length() == 0) {
+      Serial.printf("Skipping slave %u: empty topic\n", s.addr);
+      continue;
+    }
+
     if (res == node.ku8MBSuccess) {
+      // Reset fail count and mark online
+      slaveFailCount[s.addr] = 0;
+      slaveOnlineStatus[s.addr] = true;
+
+            String funcStr;
+      switch (s.func) {
+        case 1: funcStr = "coils"; break;
+        case 2: funcStr = "discrete_inputs"; break;
+        case 3: funcStr = "holding_registers"; break;
+        case 4: funcStr = "input_registers"; break;
+        default: funcStr = "unknown"; break;
+      }
+
       StaticJsonDocument<256> doc;
+      doc["type"] = funcStr;   // Add the type field
+
       for (uint16_t i = 0; i < s.count; ++i) {
-        // e.g. keys "r0", "r1", "r2", …
-        char key[4];
+        char key[8];
         snprintf(key, sizeof(key), "r%u", i);
-        doc[key] = node.getResponseBuffer(i);
+                // Coils and discrete inputs are bits packed in registers, getResponseBuffer returns uint16_t
+                // Bit extraction
+        if (s.func == 1 || s.func == 2) {
+          uint16_t coilReg = node.getResponseBuffer(i / 16);
+          uint8_t bitPos = i % 16;
+          bool coilVal = (coilReg >> bitPos) & 0x01;
+          doc[key] = coilVal;
+        } else {
+          doc[key] = node.getResponseBuffer(i);
+        }
       }
 
       String payload;
       serializeJson(doc, payload);
       mqttClient.publish(s.topic.c_str(), payload.c_str());
-      Serial.printf("%u→ %s : %s\n",s.addr, s.topic.c_str(), payload.c_str());
+
+      // Optional debug:
+      // Serial.printf("%u→ %s : %s\n", s.addr, s.topic.c_str(), payload.c_str());
     } else {
-      Serial.printf("Read failed on addr %u @0x%X count %u\n",
-                    s.addr, s.startReg, s.count);
+      Serial.printf("Read failed on addr %u func %u @0x%X count %u\n", s.addr, s.func, s.startReg, s.count);
+
+      slaveFailCount[s.addr]++;
+      if (slaveFailCount[s.addr] >= MAX_FAILS) {
+        slaveOnlineStatus[s.addr] = false;
+        Serial.printf("STATUS:SLAVE:%u,OFFLINE\n", s.addr);
+      }
     }
 
-    // tiny pause so you don’t blast the bus or watchdog
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
-
-
-
-

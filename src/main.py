@@ -356,8 +356,8 @@ class SensorDataGUI(QMainWindow):
         h2 = QHBoxLayout()
         btn_add = QPushButton('+ Add'); btn_add.clicked.connect(self.add_slave)
         btn_rem = QPushButton('- Remove'); btn_rem.clicked.connect(self.remove_slave)
-        btn_refresh = QPushButton('Refresh Slaves'); btn_refresh.clicked.connect(lambda: self.send_cmd('GET_SLAVE_LIST'))
-        btn_apply_all = QPushButton("Apply All");btn_apply_all.clicked.connect(self.send_slave_list)
+        btn_refresh = QPushButton('🔃 Refresh Slaves'); btn_refresh.clicked.connect(lambda: self.send_cmd('GET_SLAVE_LIST'))
+        btn_apply_all = QPushButton("✅ APPLY Slave ");btn_apply_all.clicked.connect(self.send_slave_list)
 # Add this button somewhere in your layout, e.g., next to Add/Remove buttons
 
         for b in [btn_add, btn_rem, btn_refresh,btn_apply_all]: h2.addWidget(b)
@@ -444,8 +444,11 @@ class SensorDataGUI(QMainWindow):
 
     def _update_slave_status(self, addr, status):
         for r in range(self.slave_table.rowCount()):
-            if int(self.slave_table.item(r,0).text())==addr:
-                self.slave_table.setItem(r,5,QTableWidgetItem(status)); return
+            try:
+                if int(self.slave_table.item(r, 0).text()) == addr:
+                    self.slave_table.setItem(r, 5, QTableWidgetItem(status))
+            except:
+                continue
 
     # --- Table Edit Handler ---
     def send_slave_list(self):
@@ -526,7 +529,7 @@ class SensorDataGUI(QMainWindow):
         self.slave_table.setItem(r, 1, QTableWidgetItem("3"))
         self.slave_table.setItem(r, 2, QTableWidgetItem("0"))
         self.slave_table.setItem(r, 3, QTableWidgetItem("1"))
-        self.slave_table.setItem(r, 4, QTableWidgetItem("sensors/new"))
+        self.slave_table.setItem(r, 4, QTableWidgetItem("sensors/1/new"))
         self.slave_table.setItem(r, 5, QTableWidgetItem("Unknown"))
 
 
@@ -560,10 +563,6 @@ serial_md = """
 wifi_md = """
 # Wi-Fi Tab Help
 
-- Wifi SSID:
-- Wifi password:
-- Test wifi:
-- Test wifi password:
 """
 
 mqtt_md = """
