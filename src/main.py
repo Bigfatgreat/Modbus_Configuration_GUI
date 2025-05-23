@@ -562,7 +562,7 @@ serial_md = """
 
 wifi_md = """
 # Wi-Fi Tab Help
-
+Input Wifi SSID and Password 
 """
 
 mqtt_md = """
@@ -582,6 +582,12 @@ rs485_md = """
 ### RS485 Status:
 - **Online/Offline Status**: If the status is unknown, use the "CHECK_RS485" command to check the RS485 health.
 
+### Function Code:
+- Function codes descriptions
+    -   01 (0x01) Read Coils
+    -   02 (0x02) Read Discrete Inputs
+    -   03 (0x03) Read Holding Registers 
+    -   04 (0x04) Read Input Registers  
 ### Common Issues:
 - When OFFLINE appear please at least check 2 times by using RS485 check button then open the serial tab.
 - When no data being parse (No value in the table) use refresh slaves button again
