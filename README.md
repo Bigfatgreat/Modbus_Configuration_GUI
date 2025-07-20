@@ -4,6 +4,8 @@
 
 โปรเเกรม Config นี้มีไว้เพื่อการในการตั้งค่า parameter ต่างๆ ในการเชื่อม Wifi, MQTT, RS485 ที่ใช้ในการสื่อสารของเซนเซอร์ที่ใช้สื่อสารผ่าน Modbus RTU (RS485) โดยตัว ESP 32 จะเป็น Master รับข้อมูลจาก sensor มาเเปลงข้อมูลเป็น json เเล้วส่งผ่าน MQTT Server เก็บไว้ของเเต่ละค่าของเเต่ละเซนเซอร์ไว้คนละ topic
 
+https://www.youtube.com/watch?v=XQNqNvUUR3k
+
 ## Option สําหรับ RS485
 
 ### Bus Config:
